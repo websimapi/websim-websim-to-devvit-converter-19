@@ -127,33 +127,9 @@ class WebsimCollection {
         this.subs = [];
         this.loaded = false;
         
-        // Request initial load with retry
-        this._requestLoad();
-    }
-
-    _requestLoad(attempt = 0) {
-        // Wait slightly for socket/bridge to stabilize
-        // Exponential backoff to prevent flooding Devvit server which causes "ServerCallRequired"
-        // Increased initial delay to allow Batch Load to happen first if possible
-        const delay = attempt === 0 ? 2000 : Math.min(2000 * Math.pow(1.5, attempt), 10000);
-        
-        setTimeout(() => {
-            if (this.loaded) return;
-            
-            // If still not loaded after a few tries, log warning but keep trying
-            if (attempt > 0 && attempt % 2 === 0) {
-                 console.log(\`[WebSim Socket] Syncing \${this.name}... (attempt \${attempt})\`);
-            }
-            
-            this.socket._sendInternal('db_load', { collection: this.name });
-            
-            // Schedule retry if not loaded
-            if (attempt < 10) {
-                this._retryTimer = setTimeout(() => {
-                    if (!this.loaded) this._requestLoad(attempt + 1);
-                }, 5000 + (attempt * 1000)); // Increase timeout for response
-            }
-        }, delay);
+        // NOTE: We no longer auto-request load. We rely on the Handshake.
+        // If data is missing (collection created post-handshake), it starts empty.
+        // This prevents the "ServerCallRequired" flood.
     }
 
     getList() {
@@ -279,34 +255,30 @@ class WebsimSocket {
         this.presence = _presence;
         this.peers = _peers;
         this.listeners = {};
-        this.collections = {}; // Cache of WebsimCollection instances
+        this.collections = {}; 
+        this.initialDataCache = {}; // Cache for pre-loaded data
         this.connected = false;
 
         // Listen for messages from Parent (Devvit Host)
         window.addEventListener('message', (e) => {
             let data = e.data;
-            // Parse if string (from Android/strict implementations)
             if (typeof data === 'string') {
                 try { data = JSON.parse(data); } catch(err) { return; }
             }
 
-            // Filter only our bridge events
             if (!data || data.type !== 'WEBSIM_SOCKET_EVT') return;
             
-            // Note: DB Dump events might not have 'senderId' or standard shape, handle broadly
             const payload = data.payload || {};
             
-            // 1. Handle DB Dump (Initial Load)
-            if (payload.type === 'db_dump') {
-                if (this.collections[payload.collection]) {
-                    this.collections[payload.collection]._handleDump(payload.data);
-                }
-                return;
-            }
-
-            // 1.5 Handle Batch Dump (Handshake Response)
+            // 1. Handle Batch Dump (Handshake Response)
             if (payload.type === 'batch_dump') {
+                console.log('[WebSim Socket] Received Handshake Data');
                 const results = payload.data || {};
+                
+                // Store in cache for future collections
+                this.initialDataCache = results;
+                
+                // Update existing
                 Object.entries(results).forEach(([colName, colData]) => {
                     if (this.collections[colName]) {
                         this.collections[colName]._handleDump(colData);
@@ -336,36 +308,33 @@ class WebsimSocket {
     collection(name) {
         if (!this.collections[name]) {
             this.collections[name] = new WebsimCollection(name, this);
+            // If we have cached data from handshake, apply it immediately
+            if (this.initialDataCache[name]) {
+                this.collections[name]._handleDump(this.initialDataCache[name]);
+            }
         }
         return this.collections[name];
     }
 
     async initialize() {
-        console.log('[WebSim Socket] Connecting to room...');
+        console.log('[WebSim Socket] Connecting...');
         this.connected = true;
         
-        // Delay join slightly to ensure server channel is ready
+        // Handshake Protocol
+        // We wait briefly for the WebView to be fully mounted in Devvit
         setTimeout(() => {
+            // 1. Join Presence
             this._sendInternal('join', { 
-                username: this.peers[this.clientId].username,
-                avatarUrl: this.peers[this.clientId].avatarUrl
+                username: this.peers[this.clientId]?.username,
+                avatarUrl: this.peers[this.clientId]?.avatarUrl
             });
             
-            // Trigger Handshake
-            this.sendHandshake();
-        }, 1000);
+            // 2. Send Ready Handshake to trigger Data Load
+            console.log('[WebSim Socket] Sending WEBVIEW_READY...');
+            window.parent.postMessage({ type: 'webViewReady' }, '*');
+        }, 500);
         
         return Promise.resolve();
-    }
-
-    sendHandshake() {
-        // Collect all currently registered collections
-        const colNames = Object.keys(this.collections);
-        console.log('[WebSim Socket] Sending Ready Handshake for collections:', colNames);
-        window.parent.postMessage({ 
-            type: 'webViewReady', 
-            payload: { collections: colNames } 
-        }, '*');
     }
 
     updatePresence(update) {

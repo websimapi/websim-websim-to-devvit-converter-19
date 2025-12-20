@@ -70,8 +70,8 @@ export default defineConfig({
   build: {
     outDir: '../webroot',
     emptyOutDir: true,
-    target: 'es2020',
-    minify: 'esbuild', // standard minification
+    target: 'esnext', // Prevent polyfills using eval
+    minify: 'esbuild', 
     rollupOptions: {
       output: {
         entryFileNames: "[name].js",
