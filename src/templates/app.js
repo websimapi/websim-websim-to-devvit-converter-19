@@ -45,11 +45,11 @@ Devvit.addCustomPostType({
           url="${webviewPath}"
           width="100%"
           height="100%"
-          onMessage={async (msg, webviewContext) => {
-            // CRITICAL: Use the context passed to onMessage, NOT the render context.
-            // The render context is stale by the time this event fires, causing "ServerCallRequired".
-            const { redis, reddit, ui } = webviewContext;
-            const { type, payload } = msg;
+          onMessage={async (msg) => {
+            const { redis, reddit, ui } = context;
+            const { type, payload } = msg || {};
+
+            if (!type) return;
 
             // 1. HYDRATE (Load All Data) - Server Push
             if (type === 'CLIENT_READY' || type === 'DB_LOAD') {
