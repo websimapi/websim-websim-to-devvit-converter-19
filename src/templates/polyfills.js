@@ -186,16 +186,20 @@ export const websimSocketPolyfill = `
         }
     }
 
-    // Mock WebSimSocket for identity handling
-    window.WebsimSocket = {
-        updateIdentity: (user) => {
-            window._currentUser = user;
-        }
-    };
-    
     // Stub websimSocketInstance for legacy checks
     window.websimSocketInstance = {
         collection: (name) => new AdapterCollection(name)
+    };
+
+    // Mock WebSimSocket Class (Fixes "not a constructor" error)
+    window.WebsimSocket = class WebsimSocket {
+        constructor() {
+            // Delegate to the singleton instance
+            return window.websimSocketInstance;
+        }
+        static updateIdentity(user) {
+            window._currentUser = user;
+        }
     };
     
     if (!window.party) { window.party = window.websimSocketInstance; }

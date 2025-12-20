@@ -45,20 +45,23 @@ Devvit.addCustomPostType({
           url="${webviewPath}"
           width="100%"
           height="100%"
-          onMessage={async (msg) => {
+          onMessage={async (msg, webviewContext) => {
+            // CRITICAL: Use the context passed to onMessage, NOT the render context.
+            // The render context is stale by the time this event fires, causing "ServerCallRequired".
+            const { redis, reddit, ui } = webviewContext;
             const { type, payload } = msg;
 
             // 1. HYDRATE (Load All Data) - Server Push
             if (type === 'CLIENT_READY' || type === 'DB_LOAD') {
                 try {
                     // Fetch Registry
-                    const collections = await context.redis.zRange(DB_REGISTRY_KEY, 0, -1);
+                    const collections = await redis.zRange(DB_REGISTRY_KEY, 0, -1);
                     const dbData = {};
                     
                     // Parallel Fetch
                     await Promise.all(collections.map(async (col) => {
                         const colName = typeof col === 'string' ? col : col.member;
-                        const raw = await context.redis.hGetAll(colName);
+                        const raw = await redis.hGetAll(colName);
                         const parsed = {};
                         // Redis returns strings, parse back to objects
                         for (const [k, v] of Object.entries(raw)) {
@@ -70,7 +73,7 @@ Devvit.addCustomPostType({
                     // Identity Injection
                     let user = null;
                     try {
-                        const currUser = await context.reddit.getCurrentUser();
+                        const currUser = await reddit.getCurrentUser();
                         user = {
                             id: currUser ? currUser.id : 'anon',
                             username: currUser ? currUser.username : 'Guest',
@@ -82,7 +85,7 @@ Devvit.addCustomPostType({
                     }
 
                     // Push to Client
-                    context.ui.webView.postMessage('gameview', {
+                    ui.webView.postMessage('gameview', {
                         type: 'DB_HYDRATE',
                         payload: dbData,
                         user
@@ -96,8 +99,8 @@ Devvit.addCustomPostType({
             if (type === 'DB_SAVE' && payload) {
                 try {
                     const { collection, key, value } = payload;
-                    await context.redis.hSet(collection, { [key]: JSON.stringify(value) });
-                    await context.redis.zAdd(DB_REGISTRY_KEY, { member: collection, score: Date.now() });
+                    await redis.hSet(collection, { [key]: JSON.stringify(value) });
+                    await redis.zAdd(DB_REGISTRY_KEY, { member: collection, score: Date.now() });
                 } catch(e) {
                     console.error('DB Save Error:', e);
                 }
