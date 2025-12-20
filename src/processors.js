@@ -272,12 +272,19 @@ export class AssetAnalyzer {
             const srcMatch = attrs.match(/src=["']([^"']+)["']/i);
             if (srcMatch) {
                 const src = srcMatch[1];
-                // If remote script (http), try to map it? 
-                // Vite doesn't like remote scripts in index.html unless ignored.
-                // Best practice: Download it or ignore. 
-                // For this converter, we'll leave it, but warn?
-                // Actually, strict CSP means we should probably leave it and let Devvit block it or user fix it.
-                // But better: if it's a library, we might have mapped it? No, script tags are hard to map to npm deps automatically without import map.
+                // Remote scripts: Leave as is (Devvit/CSP will handle blocking)
+                if (src.match(/^(https?:|\/\/)/i)) return match;
+                
+                // Local scripts: Ensure type="module" so Vite bundles them
+                if (!attrs.includes('type="module"')) {
+                    let newTag = match;
+                    if (attrs.includes('type=')) {
+                         newTag = newTag.replace(/type=["'](text\/javascript|application\/javascript)["']/i, 'type="module"');
+                    } else {
+                         newTag = newTag.replace(/<script/i, '<script type="module"');
+                    }
+                    return newTag;
+                }
                 return match; 
             }
 

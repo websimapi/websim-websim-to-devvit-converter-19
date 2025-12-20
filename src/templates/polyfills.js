@@ -302,7 +302,7 @@ export const websimStubsJs = `
             getProject: async () => ({ id: 'local', title: 'Reddit Game' }),
             collection: (name) => {
                 return window.websimSocketInstance ? window.websimSocketInstance.collection(name) : {
-                    subscribe:()=>{}, getList:()=>[], create:async()=>{}, update:async()=>{}, delete:async(){}, filter:()=>({subscribe:()=>{},getList:()=>[]})
+                    subscribe:()=>{}, getList:()=>[], create:async()=>{}, update:async()=>{}, delete:async()=>{}, filter:()=>({subscribe:()=>{},getList:()=>[]})
                 };
             },
             upload: async (blob) => {
