@@ -256,10 +256,15 @@ export class AssetAnalyzer {
         });
 
         // 2. Inject Polyfills (Logger, Socket) - Now extracted to separate files in client/
-        // We will inject <script src="./logger.js"></script> etc.
-        const polyfills = `<script type="module" src="./logger.js"></script>\n    <script type="module" src="./websim_stubs.js"></script>\n    <script type="module" src="./websim_socket.js"></script>`;
+        // We inject them as standard blocking scripts to ensure they run BEFORE any game logic.
+        // NOTE: We do NOT use type="module" for these core polyfills to ensure immediate execution order.
+        const polyfills = `
+    <script src="./logger.js"></script>
+    <script src="./websim_socket.js"></script>
+    <script src="./websim_stubs.js"></script>`;
+    
         if (html.includes('<head>')) {
-            html = html.replace('<head>', '<head>\n    ' + polyfills);
+            html = html.replace('<head>', '<head>' + polyfills);
         } else {
             html = polyfills + '\n' + html;
         }
