@@ -650,9 +650,12 @@ export const jsxDEV = (type, props, key, isStaticChildren, source, self) => {
 
 export const websimPackageJs = `
 // Bridge for "import websim from 'websim'"
-const w = window.websim || {};
+// We safely access window.websim, defaulting to empty object to prevent crashes
+const w = (typeof window !== 'undefined' && window.websim) ? window.websim : {};
+
 export default w;
-// Export common methods if destructured
+
+// Export common methods if destructured - safely accessed
 export const getProject = w.getProject;
 export const getCurrentUser = w.getCurrentUser;
 export const upload = w.upload;
