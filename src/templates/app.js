@@ -38,12 +38,36 @@ Devvit.addCustomPostType({
           
           for (const col of collections) {
             try {
-               const data = await context.redis.hGetAll(\`websim:data:\${col}\`);
-               results[col] = data || {};
-            } catch(e) { results[col] = {}; }
+               if (context.redis) {
+                   const data = await context.redis.hGetAll(`websim:data:${col}`);
+                   results[col] = data || {};
+               }
+            } catch(e) { console.error('Redis Error:', e); results[col] = {}; }
           }
-          console.log(\`[Server] Loaded \${collections.length} collections.\`);
+          console.log(`[Server] Loaded ${collections.length} collections.`);
           return { type: 'batch_dump', data: results, reqId: syncReq.id };
+        }
+
+        // GET USER (Identity) - Moved to Server to avoid ServerCallRequired in Client
+        if (type === 'get_user_context') {
+            try {
+                const user = await context.reddit.getCurrentUser();
+                return { 
+                    type: 'user_context_res', 
+                    data: {
+                        id: user.id,
+                        username: user.username,
+                        avatar_url: user.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png'
+                    }, 
+                    reqId: syncReq.id 
+                };
+            } catch(e) {
+                return { 
+                    type: 'user_context_res', 
+                    data: { id: 'anon', username: 'Anonymous', avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png' }, 
+                    reqId: syncReq.id 
+                };
+            }
         }
         
         // DB OPS (Create/Update/Delete)
@@ -91,6 +115,12 @@ Devvit.addCustomPostType({
                 payload: { type: 'batch_dump', data: serverRes.data }
             });
         } 
+        else if (serverRes.type === 'user_context_res') {
+             context.ui.webView.postMessage('gameview_' + key, {
+                type: 'set_user_context',
+                payload: serverRes.data
+             });
+        }
         else if (serverRes.type === 'broadcast_op') {
             // Broadcast to others
              channel.send({
@@ -109,7 +139,7 @@ Devvit.addCustomPostType({
           url="${webviewPath}"
           width="100%"
           height="100%"
-          onMessage={async (event) => {
+          onMessage={(event) => {
             let msg = event;
             if (typeof msg === 'string') { try { msg = JSON.parse(msg); } catch(e){} }
             if (!msg || typeof msg !== 'object') return;
@@ -144,22 +174,12 @@ Devvit.addCustomPostType({
             
             // --- USER CONTEXT ---
             else if (msg.type === 'get_user_context') {
-                 try {
-                     const user = await context.reddit.getCurrentUser();
-                     context.ui.webView.postMessage('gameview_' + key, {
-                        type: 'set_user_context',
-                        payload: {
-                            id: user.id,
-                            username: user.username,
-                            avatar_url: user.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png'
-                        }
-                     });
-                 } catch(e) {
-                     context.ui.webView.postMessage('gameview_' + key, {
-                        type: 'set_user_context',
-                        payload: { id: 'anon', username: 'Anonymous', avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png' }
-                     });
-                 }
+                 // Defer to Server (prevents ServerCallRequired)
+                 setSyncReq({
+                    id: Math.random(),
+                    type: 'get_user_context',
+                    payload: {}
+                 });
             }
             
             // --- LOGGING ---
