@@ -100,8 +100,8 @@ export class AssetAnalyzer {
         // 5. Bare Specifiers (Import Maps / Node Resolution)
         // If it looks like a package name (no path separators, not a URL), add to dependencies.
         if (!source.match(/^https?:/)) {
-            // Explicitly map websim to the local polyfill package file to avoid bare module resolution issues
-            if (source === 'websim') return '/websim_package.js'; 
+            // Explicitly keep bare 'websim' so Vite can resolve it via the alias in vite.config.js
+            if (source === 'websim') return 'websim'; 
 
             // Handle scoped packages (@org/pkg) or regular (pkg) potentially followed by /path
             const bareMatch = source.match(/^(@[^/]+\/[^/]+|[^/]+)/);
