@@ -258,7 +258,6 @@ class WebsimSocket {
         this.collections = {}; 
         this.initialDataCache = {}; // Cache for pre-loaded data
         this.connected = false;
-        this.handshakeComplete = false;
 
         // Listen for messages from Parent (Devvit Host)
         window.addEventListener('message', (e) => {
@@ -274,8 +273,6 @@ class WebsimSocket {
             // 1. Handle Batch Dump (Handshake Response)
             if (payload.type === 'batch_dump') {
                 console.log('[WebSim Socket] Received Handshake Data');
-                this.handshakeComplete = true; // Stop retrying
-
                 const results = payload.data || {};
                 
                 // Store in cache for future collections
@@ -323,29 +320,19 @@ class WebsimSocket {
         console.log('[WebSim Socket] Connecting...');
         this.connected = true;
         
-        // Handshake Protocol with Retry
-        // Devvit WebView might not be ready immediately to receive messages, 
-        // or the server might be cold-starting.
-        
-        const sendHandshake = () => {
-             if (this.handshakeComplete) return;
-             console.log('[WebSim Socket] Sending WEBVIEW_READY handshake...');
-             
-             // 1. Join Presence
-             this._sendInternal('join', { 
-                 username: this.peers[this.clientId]?.username,
-                 avatarUrl: this.peers[this.clientId]?.avatarUrl
-             });
-             
-             // 2. Request Data
-             window.parent.postMessage({ type: 'webViewReady' }, '*');
-             
-             // Retry if not acknowledged
-             setTimeout(sendHandshake, 2000);
-        };
-
-        // Start Handshake Loop
-        setTimeout(sendHandshake, 500);
+        // Handshake Protocol
+        // We wait briefly for the WebView to be fully mounted in Devvit
+        setTimeout(() => {
+            // 1. Join Presence
+            this._sendInternal('join', { 
+                username: this.peers[this.clientId]?.username,
+                avatarUrl: this.peers[this.clientId]?.avatarUrl
+            });
+            
+            // 2. Send Ready Handshake to trigger Data Load
+            console.log('[WebSim Socket] Sending CLIENT_READY...');
+            window.parent.postMessage({ type: 'client_ready' }, '*');
+        }, 500);
         
         return Promise.resolve();
     }
