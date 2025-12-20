@@ -36,16 +36,30 @@ Devvit.addCustomPostType({
           const collections = payload.collections || [];
           const results = {};
           
+          // Process sequentially to avoid race conditions or limits
           for (const col of collections) {
             try {
-               if (context.redis) {
-                   const data = await context.redis.hGetAll(\`websim:data:\${col}\`);
-                   results[col] = data || {};
-               }
-            } catch(e) { console.error('Redis Error:', e); results[col] = {}; }
+               const data = await context.redis.hGetAll(\`websim:data:\${col}\`);
+               results[col] = data || {};
+            } catch(e) { 
+                console.error(\`[Server] Redis Error loading \${col}:\`, e); 
+                results[col] = {}; 
+            }
           }
           console.log(\`[Server] Loaded \${collections.length} collections.\`);
           return { type: 'batch_dump', data: results, reqId: syncReq.id };
+        }
+
+        // SINGLE LOAD (Retry Mechanism)
+        if (type === 'db_load') {
+            const { collection } = payload;
+            try {
+                const data = await context.redis.hGetAll(\`websim:data:\${collection}\`);
+                return { type: 'db_dump', data: data || {}, collection, reqId: syncReq.id };
+            } catch(e) {
+                console.error(\`[Server] Redis Error loading \${collection}:\`, e);
+                return { type: 'db_dump', data: {}, collection, reqId: syncReq.id };
+            }
         }
 
         // GET USER (Identity) - Moved to Server to avoid ServerCallRequired in Client
@@ -109,17 +123,24 @@ Devvit.addCustomPostType({
         setLastProcessed(serverRes.reqId);
         
         if (serverRes.type === 'batch_dump') {
-            // Send Data to WebView
-            context.ui.webView.postMessage('gameview_' + key, {
+            // Send Data to WebView (Stringified for safety)
+            context.ui.webView.postMessage('gameview_' + key, JSON.stringify({
                 type: 'WEBSIM_SOCKET_EVT',
                 payload: { type: 'batch_dump', data: serverRes.data }
-            });
-        } 
+            }));
+        }
+        else if (serverRes.type === 'db_dump') {
+            // Send Single Collection Dump
+            context.ui.webView.postMessage('gameview_' + key, JSON.stringify({
+                type: 'WEBSIM_SOCKET_EVT',
+                payload: { type: 'db_dump', data: serverRes.data, collection: serverRes.collection }
+            }));
+        }
         else if (serverRes.type === 'user_context_res') {
-             context.ui.webView.postMessage('gameview_' + key, {
+             context.ui.webView.postMessage('gameview_' + key, JSON.stringify({
                 type: 'set_user_context',
                 payload: serverRes.data
-             });
+             }));
         }
         else if (serverRes.type === 'broadcast_op') {
             // Broadcast to others
@@ -163,6 +184,14 @@ Devvit.addCustomPostType({
                      setSyncReq({
                         id: Math.random(),
                         type: 'db_op',
+                        payload: payload
+                    });
+                }
+                // Routes DB Loads (Retries) to Server
+                else if (type === 'db_load') {
+                    setSyncReq({
+                        id: Math.random(),
+                        type: 'db_load',
                         payload: payload
                     });
                 }

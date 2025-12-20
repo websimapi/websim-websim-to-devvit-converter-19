@@ -134,7 +134,8 @@ class WebsimCollection {
     _requestLoad(attempt = 0) {
         // Wait slightly for socket/bridge to stabilize
         // Exponential backoff to prevent flooding Devvit server which causes "ServerCallRequired"
-        const delay = attempt === 0 ? 500 : Math.min(2000 * Math.pow(1.5, attempt), 10000);
+        // Increased initial delay to allow Batch Load to happen first if possible
+        const delay = attempt === 0 ? 2000 : Math.min(2000 * Math.pow(1.5, attempt), 10000);
         
         setTimeout(() => {
             if (this.loaded) return;
