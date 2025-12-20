@@ -255,13 +255,10 @@ export class AssetAnalyzer {
             return '<!-- Import Map Removed by Converter -->';
         });
 
-        // 2. Inject Polyfills (Logger, Socket) - Now extracted to separate files in client/
-        // We inject them as standard blocking scripts to ensure they run BEFORE any game logic.
-        // NOTE: We do NOT use type="module" for these core polyfills to ensure immediate execution order.
+        // 2. Inject Polyfills (Logger, Socket)
+        // We inject as a single module to satisfy Vite's bundler, while maintaining global side-effects.
         const polyfills = `
-    <script src="./logger.js"></script>
-    <script src="./websim_socket.js"></script>
-    <script src="./websim_stubs.js"></script>`;
+    <script type="module" src="./websim_polyfills.js"></script>`;
     
         if (html.includes('<head>')) {
             html = html.replace('<head>', '<head>' + polyfills);
@@ -298,10 +295,10 @@ export class AssetAnalyzer {
             const processedContent = this.processJS(content, newScriptName);
             extractedScripts.push({ filename: newScriptName, content: processedContent });
 
-            // Force type="module" for Vite compatibility usually, or just keep original type?
-            // If it has imports, it must be module.
+            // Force type="module" for all scripts to ensure consistent execution order (deferred)
+            // with the polyfills which are also modules.
             let newAttrs = attrs;
-            if (processedContent.includes('import ') && !newAttrs.includes('type="module"')) {
+            if (!newAttrs.includes('type="module"')) {
                 newAttrs += ' type="module"';
             }
 

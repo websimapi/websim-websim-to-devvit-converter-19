@@ -44,19 +44,9 @@ Devvit.addCustomPostType({
     // meta: "game:{postId}:collections" (Set of known collection names)
 
     // 1. Initial Data Load (Server Push)
-    // We fetch EVERYTHING needed for the game start here to avoid "ServerCallRequired" later.
     const { data: initData, loading, error } = useAsync(async () => {
-        const { redis, reddit } = context;
+        const { redis } = context;
         
-        // A. Identity
-        const user = await reddit.getCurrentUser();
-        const identity = {
-            id: user ? user.id : 'anon',
-            username: user ? user.username : 'Guest',
-            avatar_url: user?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png',
-        };
-
-        // B. Database Dump
         // Fetch known collections
         const metaKey = \`game:\${postId}:collections\`;
         const collectionsStr = await redis.get(metaKey);
@@ -64,14 +54,10 @@ Devvit.addCustomPostType({
         
         const dump = {};
         for (const col of collectionNames) {
-            // HGETALL returns object { key: value }
             dump[col] = await redis.hGetAll(\`game:\${postId}:\${col}\`) || {};
         }
 
-        return {
-            database: dump,
-            currentUser: identity
-        };
+        return { database: dump };
     });
 
     // 2. Realtime Channel
@@ -102,13 +88,20 @@ Devvit.addCustomPostType({
                     // A. Handshake: Client Ready -> Send Init Data
                     if (msg.type === 'webViewReady') {
                         if (initData) {
-                            console.log('[Server] Handshake received, sending init data.');
+                            // Identity Hot-Swap: Fetch fresh user data at connection time
+                            const user = await context.reddit.getCurrentUser();
+                            const identity = {
+                                id: user ? user.id : 'anon',
+                                username: user ? user.username : 'Guest',
+                                avatar_url: user?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png',
+                            };
+
                             context.ui.webView.postMessage('gameview', {
                                 type: 'WEBSIM_SOCKET_EVT',
                                 payload: { 
                                     type: 'batch_dump', 
                                     data: initData.database,
-                                    user: initData.currentUser
+                                    user: identity
                                 }
                             });
                         }
