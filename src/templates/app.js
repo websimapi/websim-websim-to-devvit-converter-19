@@ -26,22 +26,27 @@ Devvit.addCustomPostType({
       if (!syncReq.id || syncReq.id === 0) return null;
       
       const { type, payload } = syncReq;
-      console.log(\`[Server] Processing Request: \${type}\`);
 
       try {
-        if (!context || !context.redis) throw new Error('No Redis Context');
+        // Safety check: In some environments (like playtest client-side hydration), 
+        // context.redis might throw 'ServerCallRequired' immediately or be missing.
+        // We catch this to prevent client-side crashes, relying on the Server-side execution to succeed.
+        if (!context || !context.redis) return null;
+
+        console.log(\`[Server] Processing Request: \${type}\`);
 
         // BATCH LOAD (Handshake)
         if (type === 'batch_load') {
           const collections = payload.collections || [];
           const results = {};
           
-          // Process sequentially to avoid race conditions or limits
           for (const col of collections) {
             try {
                const data = await context.redis.hGetAll(\`websim:data:\${col}\`);
                results[col] = data || {};
             } catch(e) { 
+                // Ignore ServerCallRequired locally, allow other errors
+                if (e.message && e.message.includes('ServerCallRequired')) throw e;
                 console.error(\`[Server] Redis Error loading \${col}:\`, e); 
                 results[col] = {}; 
             }
@@ -53,16 +58,11 @@ Devvit.addCustomPostType({
         // SINGLE LOAD (Retry Mechanism)
         if (type === 'db_load') {
             const { collection } = payload;
-            try {
-                const data = await context.redis.hGetAll(\`websim:data:\${collection}\`);
-                return { type: 'db_dump', data: data || {}, collection, reqId: syncReq.id };
-            } catch(e) {
-                console.error(\`[Server] Redis Error loading \${collection}:\`, e);
-                return { type: 'db_dump', data: {}, collection, reqId: syncReq.id };
-            }
+            const data = await context.redis.hGetAll(\`websim:data:\${collection}\`);
+            return { type: 'db_dump', data: data || {}, collection, reqId: syncReq.id };
         }
 
-        // GET USER (Identity) - Moved to Server to avoid ServerCallRequired in Client
+        // GET USER (Identity)
         if (type === 'get_user_context') {
             try {
                 const user = await context.reddit.getCurrentUser();
@@ -76,6 +76,7 @@ Devvit.addCustomPostType({
                     reqId: syncReq.id 
                 };
             } catch(e) {
+                // Return anon if user fetch fails (or if on client and it throws)
                 return { 
                     type: 'user_context_res', 
                     data: { id: 'anon', username: 'Anonymous', avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png' }, 
@@ -84,7 +85,7 @@ Devvit.addCustomPostType({
             }
         }
         
-        // DB OPS (Create/Update/Delete)
+        // DB OPS
         if (type === 'db_op') {
            const { cmd, collection, data } = payload;
            const redisKey = \`websim:data:\${collection}\`;
@@ -99,6 +100,14 @@ Devvit.addCustomPostType({
         }
 
       } catch (err) {
+        // CRITICAL FIX: Ignore "ServerCallRequired" errors.
+        // These happen because useAsync sometimes attempts to run on the Client (WebView/Worker) 
+        // during hydration updates. We must swallow this error so the Client doesn't crash.
+        // The real Server-side execution will succeed and return the data.
+        if (err.message && err.message.includes('ServerCallRequired')) {
+            return null;
+        }
+
         console.error('[Server] Error:', err);
         return { type: 'error', error: String(err), reqId: syncReq.id };
       }
