@@ -69,8 +69,8 @@ files.forEach(fileObj => {
         // Check for http/https usage in imports/scripts
         // Only warn if it looks like a script source or import, avoiding common XML namespaces
         // We look for 'from "http' or 'src="http' specifically.
-        // We use a regex that avoids matching "http://www.w3.org..." used in createElementNS
-        if (content.match(/from\\s+['"]http/i) || content.match(/src\\s*=\\s*['"]http(?!:\\/\\/www\\.w3\\.org)/i)) {
+        // We use a regex that avoids matching "http://www.w3.org..." or redditstatic
+        if (content.match(/from\\s+['"]http/i) || content.match(/src\\s*=\\s*['"]http(?!:\\/\\/(www\\.w3\\.org|www\\.redditstatic\\.com))/i)) {
             console.warn(\`⚠️  Possible remote import in \${f}. Devvit may block this.\`);
             const match = content.match(/(?:from|src\\s*=\\s*)['"](http[^'"]+)/i);
             if (match) console.warn(\`   Target: \${match[1]}\`);

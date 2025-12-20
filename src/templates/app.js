@@ -102,6 +102,7 @@ Devvit.addCustomPostType({
                     // A. Handshake: Client Ready -> Send Init Data
                     if (msg.type === 'webViewReady') {
                         if (initData) {
+                            console.log('[Server] Handshake received, sending init data.');
                             context.ui.webView.postMessage('gameview', {
                                 type: 'WEBSIM_SOCKET_EVT',
                                 payload: { 

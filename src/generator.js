@@ -120,9 +120,13 @@ export async function generateDevvitZip(projectMeta, assets, includeReadme = tru
     }
 
     // Add Polyfills to Client
-    clientFolder.file("logger.js", simpleLoggerJs);
-    clientFolder.file("websim_socket.js", websimSocketPolyfill);
-    clientFolder.file("websim_stubs.js", websimStubsJs);
+    // We place HTML-injected polyfills in public/ so they are copied as static assets
+    // and not bundled/hashed by Vite. This fixes loading errors (MIME type mismatches) in the webview.
+    publicFolder.file("logger.js", simpleLoggerJs);
+    publicFolder.file("websim_socket.js", websimSocketPolyfill);
+    publicFolder.file("websim_stubs.js", websimStubsJs);
+
+    // Modules referenced by import aliases must stay in source root
     clientFolder.file("websim_package.js", websimPackageJs);
     clientFolder.file("jsx-dev-proxy.js", jsxDevProxy);
 
