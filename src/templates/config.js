@@ -70,7 +70,7 @@ export default defineConfig({
   build: {
     outDir: '../webroot',
     emptyOutDir: true,
-    target: 'esnext', // Prevent polyfills using eval
+    target: 'es2020', // Ensure broad compatibility without unsafe polyfills
     minify: 'esbuild', 
     rollupOptions: {
       output: {

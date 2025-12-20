@@ -88,6 +88,12 @@ files.forEach(fileObj => {
                  }
              }
         }
+
+        // Check for eval()
+        if (content.includes('eval(')) {
+             console.warn(\`⚠️  Dangerous 'eval()' usage detected in \${f}. This will likely be blocked by CSP.\`);
+             issues++;
+        }
     }
 });
 
