@@ -3,7 +3,7 @@ export const getMainTsx = (title, webviewPath = 'index.html') => {
   return `/** @jsx Devvit.createElement */
 /** @jsxFrag Devvit.Fragment */
 
-import { Devvit, useState, useAsync } from '@devvit/public-api';
+import { Devvit } from '@devvit/public-api';
 
 // 1. Define the Registry Key
 const DB_REGISTRY_KEY = 'sys:registry';
@@ -38,80 +38,6 @@ Devvit.addCustomPostType({
   name: 'WebSim Game',
   height: 'tall',
   render: (context) => {
-    // STATE: Tracks what the Client wants the Server to do
-    // 'id' ensures useAsync re-runs when task changes
-    const [task, setTask] = useState({ type: 'IDLE', payload: null, id: 0 });
-
-    // ---------------------------------------------------------
-    // GENERIC DATABASE HANDLER (Running on Server)
-    // ---------------------------------------------------------
-    useAsync(async () => {
-      if (task.type === 'IDLE') return;
-
-      try {
-        // A. GENERIC SAVE: "Hot Swap" Support
-        // The client sends { collection: 'enemies', key: 'orc_1', value: {...} }
-        if (task.type === 'DB_SAVE') {
-          const { collection, key, value } = task.payload;
-          
-          // 1. Save the actual data
-          await context.redis.hSet(collection, { [key]: JSON.stringify(value) });
-          
-          // 2. Register this collection so we know to load it next time
-          await context.redis.zAdd(DB_REGISTRY_KEY, { member: collection, score: Date.now() });
-        }
-
-        // B. GENERIC LOAD: The "Magic" Loader
-        // Fetches ALL collections registered in the system automatically
-        if (task.type === 'DB_LOAD') {
-          // 1. Get list of all collections we ever saved
-          const collections = await context.redis.zRange(DB_REGISTRY_KEY, 0, -1);
-          
-          const fullDatabase = {};
-          
-          // 2. Load them all in parallel
-          await Promise.all(collections.map(async (col) => {
-            // zRange return type depends on version, normalizing to string
-            const colName = typeof col === 'string' ? col : col.member;
-            
-            const data = await context.redis.hGetAll(colName);
-            // Parse JSON strings back to objects
-            const parsedData = {};
-            for (const [k, v] of Object.entries(data)) {
-                 try { parsedData[k] = JSON.parse(v); } catch(e) { parsedData[k] = v; }
-            }
-            fullDatabase[colName] = parsedData;
-          }));
-
-          // 3. Identity Injection (Critical for WebSim apps)
-          let identity = null;
-          try {
-             const user = await context.reddit.getCurrentUser();
-             identity = {
-                id: user ? user.id : 'anon',
-                username: user ? user.username : 'Guest',
-                avatar_url: user?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png',
-             };
-          } catch(e) {
-             console.error('Identity fetch error', e);
-          }
-
-          // 4. Send the entire DB state to the game
-          context.ui.webView.postMessage('gameview', {
-            type: 'DB_HYDRATE',
-            payload: fullDatabase,
-            user: identity
-          });
-        }
-
-      } catch (err) {
-        console.error("DB Error:", err);
-      }
-    }, { depends: [task.id] }); // Re-run whenever task ID changes
-
-    // ---------------------------------------------------------
-    // UI & MESSAGE ROUTING
-    // ---------------------------------------------------------
     return (
       <vstack height="100%" width="100%">
         <webview
@@ -119,22 +45,67 @@ Devvit.addCustomPostType({
           url="${webviewPath}"
           width="100%"
           height="100%"
-          onMessage={(msg) => {
-            // "Internal" handshake to ensure connection is alive
-            if (msg.type === 'CLIENT_READY') {
-              // console.log("Client connected. Loading DB...");
-              setTask({ type: 'DB_LOAD', payload: null, id: Date.now() });
-              return;
+          onMessage={async (msg) => {
+            const { type, payload } = msg;
+
+            // 1. HYDRATE (Load All Data) - Server Push
+            if (type === 'CLIENT_READY' || type === 'DB_LOAD') {
+                try {
+                    // Fetch Registry
+                    const collections = await context.redis.zRange(DB_REGISTRY_KEY, 0, -1);
+                    const dbData = {};
+                    
+                    // Parallel Fetch
+                    await Promise.all(collections.map(async (col) => {
+                        const colName = typeof col === 'string' ? col : col.member;
+                        const raw = await context.redis.hGetAll(colName);
+                        const parsed = {};
+                        // Redis returns strings, parse back to objects
+                        for (const [k, v] of Object.entries(raw)) {
+                            try { parsed[k] = JSON.parse(v); } catch(e) { parsed[k] = v; }
+                        }
+                        dbData[colName] = parsed;
+                    }));
+
+                    // Identity Injection
+                    let user = null;
+                    try {
+                        const currUser = await context.reddit.getCurrentUser();
+                        user = {
+                            id: currUser ? currUser.id : 'anon',
+                            username: currUser ? currUser.username : 'Guest',
+                            avatar_url: currUser?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png'
+                        };
+                    } catch(e) {
+                         // Fallback identity
+                         user = { id: 'anon', username: 'Guest', avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png' };
+                    }
+
+                    // Push to Client
+                    context.ui.webView.postMessage('gameview', {
+                        type: 'DB_HYDRATE',
+                        payload: dbData,
+                        user
+                    });
+                } catch(e) {
+                    console.error('DB Load Error:', e);
+                }
             }
 
-            // Route database requests to the async handler
-            if (msg.type === 'DB_SAVE' || msg.type === 'DB_LOAD') {
-              setTask({ type: msg.type, payload: msg.payload, id: Date.now() });
+            // 2. SAVE (Hot Swap)
+            if (type === 'DB_SAVE' && payload) {
+                try {
+                    const { collection, key, value } = payload;
+                    await context.redis.hSet(collection, { [key]: JSON.stringify(value) });
+                    await context.redis.zAdd(DB_REGISTRY_KEY, { member: collection, score: Date.now() });
+                } catch(e) {
+                    console.error('DB Save Error:', e);
+                }
             }
             
-            // Log forwarding (optional)
-            if (msg.type === 'console') {
-                // console.log('[Web]', ...(msg.args || []));
+            // 3. Logging
+            if (type === 'console') {
+                console.log('[Web]', ...(msg.args || []));
             }
           }}
         />
