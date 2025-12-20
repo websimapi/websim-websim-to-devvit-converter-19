@@ -3,12 +3,14 @@ export const getMainTsx = (title, webviewPath = 'index.html') => {
   return `/** @jsx Devvit.createElement */
 /** @jsxFrag Devvit.Fragment */
 
-import { Devvit, useChannel, useAsync, useState } from '@devvit/public-api';
+import { Devvit, useState, useAsync } from '@devvit/public-api';
+
+// 1. Define the Registry Key
+const DB_REGISTRY_KEY = 'sys:registry';
 
 Devvit.configure({
   redditAPI: true,
   redis: true,
-  realtime: true,
 });
 
 Devvit.addMenuItem({
@@ -36,126 +38,109 @@ Devvit.addCustomPostType({
   name: 'WebSim Game',
   height: 'tall',
   render: (context) => {
-    const postId = context.postId || 'global';
-    
-    // --- Redis Logic (Simplified) ---
-    // We map WebSim "collections" to Redis Hashes.
-    // keys: "game:{postId}:{collectionName}"
-    // meta: "game:{postId}:collections" (Set of known collection names)
+    // STATE: Tracks what the Client wants the Server to do
+    // 'id' ensures useAsync re-runs when task changes
+    const [task, setTask] = useState({ type: 'IDLE', payload: null, id: 0 });
 
-    // 1. Initial Data Load (Server Push)
-    const { data: initData, loading, error } = useAsync(async () => {
-        const { redis } = context;
-        
-        // Fetch known collections
-        const metaKey = \`game:\${postId}:collections\`;
-        const collectionsStr = await redis.get(metaKey);
-        const collectionNames = collectionsStr ? JSON.parse(collectionsStr) : [];
-        
-        const dump = {};
-        for (const col of collectionNames) {
-            dump[col] = await redis.hGetAll(\`game:\${postId}:\${col}\`) || {};
+    // ---------------------------------------------------------
+    // GENERIC DATABASE HANDLER (Running on Server)
+    // ---------------------------------------------------------
+    useAsync(async () => {
+      if (task.type === 'IDLE') return;
+
+      try {
+        // A. GENERIC SAVE: "Hot Swap" Support
+        // The client sends { collection: 'enemies', key: 'orc_1', value: {...} }
+        if (task.type === 'DB_SAVE') {
+          const { collection, key, value } = task.payload;
+          
+          // 1. Save the actual data
+          await context.redis.hSet(collection, { [key]: JSON.stringify(value) });
+          
+          // 2. Register this collection so we know to load it next time
+          await context.redis.zAdd(DB_REGISTRY_KEY, { member: collection, score: Date.now() });
         }
 
-        return { database: dump };
-    });
+        // B. GENERIC LOAD: The "Magic" Loader
+        // Fetches ALL collections registered in the system automatically
+        if (task.type === 'DB_LOAD') {
+          // 1. Get list of all collections we ever saved
+          const collections = await context.redis.zRange(DB_REGISTRY_KEY, 0, -1);
+          
+          const fullDatabase = {};
+          
+          // 2. Load them all in parallel
+          await Promise.all(collections.map(async (col) => {
+            // zRange return type depends on version, normalizing to string
+            const colName = typeof col === 'string' ? col : col.member;
+            
+            const data = await context.redis.hGetAll(colName);
+            // Parse JSON strings back to objects
+            const parsedData = {};
+            for (const [k, v] of Object.entries(data)) {
+                 try { parsedData[k] = JSON.parse(v); } catch(e) { parsedData[k] = v; }
+            }
+            fullDatabase[colName] = parsedData;
+          }));
 
-    // 2. Realtime Channel
-    const channel = useChannel({
-        name: \`game_\${postId}\`,
-        onMessage: (msg) => {
-            context.ui.webView.postMessage('gameview', {
-                type: 'WEBSIM_SOCKET_EVT',
-                payload: msg
-            });
+          // 3. Identity Injection (Critical for WebSim apps)
+          let identity = null;
+          try {
+             const user = await context.reddit.getCurrentUser();
+             identity = {
+                id: user ? user.id : 'anon',
+                username: user ? user.username : 'Guest',
+                avatar_url: user?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png',
+             };
+          } catch(e) {
+             console.error('Identity fetch error', e);
+          }
+
+          // 4. Send the entire DB state to the game
+          context.ui.webView.postMessage('gameview', {
+            type: 'DB_HYDRATE',
+            payload: fullDatabase,
+            user: identity
+          });
         }
-    });
-    channel.subscribe();
 
+      } catch (err) {
+        console.error("DB Error:", err);
+      }
+    }, { depends: [task.id] }); // Re-run whenever task ID changes
+
+    // ---------------------------------------------------------
+    // UI & MESSAGE ROUTING
+    // ---------------------------------------------------------
     return (
-        <vstack height="100%" width="100%" alignment="center middle">
-            <webview
-                id="gameview"
-                url="${webviewPath}"
-                width="100%"
-                height="100%"
-                onMessage={async (msg) => {
-                    // console.log('[Devvit] Received:', JSON.stringify(msg));
-                    if (!msg || !msg.type) return;
+      <vstack height="100%" width="100%">
+        <webview
+          id="gameview"
+          url="${webviewPath}"
+          width="100%"
+          height="100%"
+          onMessage={(msg) => {
+            // "Internal" handshake to ensure connection is alive
+            if (msg.type === 'CLIENT_READY') {
+              // console.log("Client connected. Loading DB...");
+              setTask({ type: 'DB_LOAD', payload: null, id: Date.now() });
+              return;
+            }
 
-                    const { redis } = context;
-
-                    // A. Handshake: Client Ready -> Send Init Data
-                    if (msg.type === 'webViewReady') {
-                        if (initData) {
-                            // Identity Hot-Swap: Fetch fresh user data at connection time
-                            const user = await context.reddit.getCurrentUser();
-                            const identity = {
-                                id: user ? user.id : 'anon',
-                                username: user ? user.username : 'Guest',
-                                avatar_url: user?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png',
-                            };
-
-                            context.ui.webView.postMessage('gameview', {
-                                type: 'WEBSIM_SOCKET_EVT',
-                                payload: { 
-                                    type: 'batch_dump', 
-                                    data: initData.database,
-                                    user: identity
-                                }
-                            });
-                        }
-                    }
-
-                    // B. Database Writes
-                    else if (msg.type === 'WEBSIM_SOCKET_MSG') {
-                        const wrapper = msg.payload || {};
-                        const { type, payload } = wrapper;
-
-                        // DB Operations
-                        if (type === 'db_op') {
-                            const { cmd, collection, data } = payload;
-                            const colKey = \`game:\${postId}:\${collection}\`;
-                            
-                            // Ensure collection is tracked
-                            const metaKey = \`game:\${postId}:collections\`;
-                            const collectionsStr = await redis.get(metaKey);
-                            const list = collectionsStr ? JSON.parse(collectionsStr) : [];
-                            if (!list.includes(collection)) {
-                                list.push(collection);
-                                await redis.set(metaKey, JSON.stringify(list));
-                            }
-
-                            if (cmd === 'create' || cmd === 'update') {
-                                // HSET key field value
-                                await redis.hSet(colKey, { [data.id]: JSON.stringify(data) });
-                            } else if (cmd === 'delete') {
-                                await redis.hDel(colKey, [data.id]);
-                            }
-
-                            // Broadcast sync to other clients
-                            await channel.send({
-                                type: 'db_sync',
-                                collection,
-                                op: payload
-                            });
-                        } 
-                        // Other broadcast events (presence etc)
-                        else {
-                            await channel.send(wrapper); // Send original payload wrapper
-                        }
-                    }
-                    
-                    // C. Logging
-                    else if (msg.type === 'console') {
-                         // Optional: Uncomment to see webview logs in terminal
-                         // console.log(\`[Web] \${msg.args.join(' ')}\`);
-                    }
-                }}
-            />
-        </vstack>
+            // Route database requests to the async handler
+            if (msg.type === 'DB_SAVE' || msg.type === 'DB_LOAD') {
+              setTask({ type: msg.type, payload: msg.payload, id: Date.now() });
+            }
+            
+            // Log forwarding (optional)
+            if (msg.type === 'console') {
+                // console.log('[Web]', ...(msg.args || []));
+            }
+          }}
+        />
+      </vstack>
     );
-  }
+  },
 });
 
 export default Devvit;
