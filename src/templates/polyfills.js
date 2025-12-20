@@ -519,6 +519,14 @@ export const websimStubsJs = `
             // Also update socket identity if available
             if (window.WebsimSocket && window.WebsimSocket.updateIdentity) {
                 window.WebsimSocket.updateIdentity(_currentUser);
+                const sock = window.websimSocketInstance;
+                if(sock && sock._sendInternal) {
+                    // Re-broadcast join to update peers with real name
+                    sock._sendInternal('join', {
+                        username: _currentUser.username,
+                        avatarUrl: _currentUser.avatar_url
+                    });
+                }
             }
         }
     });

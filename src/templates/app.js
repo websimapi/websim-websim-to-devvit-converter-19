@@ -20,41 +20,47 @@ class GameDB {
     }
 
     async getCollection(name) {
-        return await this.redis.hGetAll(\`\${this.prefix}:\${name}\`) || {};
+        try {
+            return await this.redis.hGetAll(\`\${this.prefix}:\${name}\`) || {};
+        } catch(e) { console.error('Redis Read Error', e); return {}; }
     }
 
     async save(collection, id, data) {
-        // Track collection names in a meta-list
         const metaKey = \`\${this.prefix}:meta:collections\`;
-        
-        // Optimistic list update (using Set logic would be better but keeping compat)
-        const exists = await this.redis.get(metaKey);
-        const list = exists ? JSON.parse(exists) : [];
-        if (!list.includes(collection)) {
-            list.push(collection);
-            await this.redis.set(metaKey, JSON.stringify(list));
-        }
-        
-        // Save Record
-        await this.redis.hSet(\`\${this.prefix}:\${collection}\`, {
-            [id]: JSON.stringify(data)
-        });
+        try {
+            const exists = await this.redis.get(metaKey);
+            const list = exists ? JSON.parse(exists) : [];
+            if (!list.includes(collection)) {
+                list.push(collection);
+                await this.redis.set(metaKey, JSON.stringify(list));
+            }
+            await this.redis.hSet(\`\${this.prefix}:\${collection}\`, {
+                [id]: JSON.stringify(data)
+            });
+        } catch(e) { console.error('Redis Write Error', e); }
     }
 
     async delete(collection, id) {
-        await this.redis.hDel(\`\${this.prefix}:\${collection}\`, [id]);
+        try {
+            await this.redis.hDel(\`\${this.prefix}:\${collection}\`, [id]);
+        } catch(e) { console.error('Redis Delete Error', e); }
     }
 
     async dumpAll() {
-        const metaKey = \`\${this.prefix}:meta:collections\`;
-        const exists = await this.redis.get(metaKey);
-        const list = exists ? JSON.parse(exists) : [];
-        
-        const dump = {};
-        for (const col of list) {
-            dump[col] = await this.getCollection(col);
+        try {
+            const metaKey = \`\${this.prefix}:meta:collections\`;
+            const exists = await this.redis.get(metaKey);
+            const list = exists ? JSON.parse(exists) : [];
+            
+            const dump = {};
+            for (const col of list) {
+                dump[col] = await this.getCollection(col);
+            }
+            return dump;
+        } catch(e) {
+            console.error('Redis Dump Error', e);
+            return {};
         }
-        return dump;
     }
 }
 
@@ -86,17 +92,33 @@ Devvit.addCustomPostType({
     const postId = context.postId || 'global';
     const db = new GameDB(context.redis, postId);
 
-    // 1. Load Initial State (Server-Side)
-    // using useAsync ensures Redis calls happen in the correct context
-    const { data: initialData, loading, error } = useAsync(async () => {
-        return await db.dumpAll();
+    // 1. Server-Side Data Load & Identity Injection (Server-Push)
+    const { data: initData, loading, error } = useAsync(async () => {
+        const [dump, user] = await Promise.all([
+            db.dumpAll(),
+            context.reddit.getCurrentUser()
+        ]);
+
+        const identity = {
+            id: user ? user.id : 'anon',
+            username: user ? user.username : 'Guest',
+            avatar_url: user?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png',
+            // Generic mappings for game engines
+            name: user ? user.username : 'Guest',
+            display_name: user ? user.username : 'Guest',
+            player_image: user?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png'
+        };
+
+        return {
+            database: dump,
+            currentUser: identity
+        };
     });
 
-    // 2. Realtime Channel for Multiplayer Events
+    // 2. Realtime Channel
     const channel = useChannel({
         name: \`game_\${postId}\`,
         onMessage: (msg) => {
-            // Forward events from other clients to our WebView
             context.ui.webView.postMessage('gameview', {
                 type: 'WEBSIM_SOCKET_EVT',
                 payload: msg
@@ -116,58 +138,51 @@ Devvit.addCustomPostType({
                     if (!msg || !msg.type) return;
 
                     try {
-                        // 1. Handshake: Send pre-loaded data
-                        if (msg.type === 'webViewReady') {
-                            context.ui.webView.postMessage('gameview', {
-                                type: 'WEBSIM_SOCKET_EVT',
-                                payload: { 
-                                    type: 'batch_dump', 
-                                    data: initialData || {} 
+                        // 1. Handshake: Client is ready, Server Pushes Data + Identity
+                        if (msg.type === 'webViewReady' || msg.type === 'get_user_context') {
+                            if (initData) {
+                                // Send DB Dump
+                                if (msg.type === 'webViewReady') {
+                                    context.ui.webView.postMessage('gameview', {
+                                        type: 'WEBSIM_SOCKET_EVT',
+                                        payload: { 
+                                            type: 'batch_dump', 
+                                            data: initData.database || {} 
+                                        }
+                                    });
                                 }
-                            });
-                        }
-                        
-                        // 2. User Context: Fetch Reddit Username/Avatar
-                        else if (msg.type === 'get_user_context') {
-                            let user = null;
-                            try { user = await context.reddit.getCurrentUser(); } catch(e) {}
-                            
-                            context.ui.webView.postMessage('gameview', {
-                                type: 'set_user_context',
-                                payload: {
-                                    id: user ? user.id : 'anon',
-                                    username: user ? user.username : 'Guest',
-                                    avatar_url: user?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png'
-                                }
-                            });
+                                
+                                // Send Native Identity (Hot-Swap)
+                                context.ui.webView.postMessage('gameview', {
+                                    type: 'set_user_context',
+                                    payload: initData.currentUser
+                                });
+                            }
                         }
 
-                        // 3. Socket/DB Operations (Create, Update, Delete)
+                        // 2. Writes (Persist & Broadcast)
                         else if (msg.type === 'WEBSIM_SOCKET_MSG') {
                             const { type, payload } = msg.payload || {};
                             
-                            // Database Operations (Persisted to Redis)
                             if (type === 'db_op') {
                                 const { cmd, collection, data } = payload;
+                                // Writes are allowed in event handlers
                                 if (cmd === 'create' || cmd === 'update') {
                                     await db.save(collection, data.id, data);
                                 } else if (cmd === 'delete') {
                                     await db.delete(collection, data.id);
                                 }
                                 
-                                // Broadcast change to other clients
                                 await channel.send({
                                     type: 'db_sync',
                                     collection,
                                     op: payload
                                 });
                             } else {
-                                // Ephemeral Events (Presence, Chat) - Just Broadcast
                                 await channel.send(msg.payload);
                             }
                         }
                         
-                        // 4. Console Logging from WebView
                         else if (msg.type === 'console') {
                              // console.log(\`[Web] \${msg.args.join(' ')}\`);
                         }
