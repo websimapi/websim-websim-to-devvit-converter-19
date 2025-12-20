@@ -195,6 +195,11 @@ export const websimSocketPolyfill = `
     window.WebsimSocket = class WebsimSocket {
         constructor() {
             // Delegate to the singleton instance
+            if (!window.websimSocketInstance) {
+                // Should have been created by previous lines, but safe fallback
+                console.warn("[WebSimSocket] Instance not ready, creating fallback");
+                window.websimSocketInstance = { collection: () => ({ subscribe:()=>{}, getList:()=>[], create:async()=>{}, update:async()=>{}, delete:async(){} }) };
+            }
             return window.websimSocketInstance;
         }
         static updateIdentity(user) {
@@ -205,10 +210,15 @@ export const websimSocketPolyfill = `
     if (!window.party) { window.party = window.websimSocketInstance; }
 
     // Initialize Bridge
+    // Use a small timeout to allow React/UI to settle before asking for data
+    const startBridge = () => {
+        setTimeout(DevvitBridge.init, 100);
+    };
+
     if (document.readyState === 'complete') {
-        DevvitBridge.init();
+        startBridge();
     } else {
-        window.addEventListener('load', DevvitBridge.init);
+        window.addEventListener('load', startBridge);
     }
 })();
 `;
