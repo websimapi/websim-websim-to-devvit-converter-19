@@ -1,62 +1,109 @@
+export const getServerTs = () => `
+import { Devvit, RedditAPIClient, RedisClient } from '@devvit/public-api';
+
+// Registry key to track all active collections
+const DB_REGISTRY_KEY = 'sys:registry';
+
+export type WebViewMessage = {
+  type: string;
+  payload?: any;
+};
+
+// --- Helper: Identity Resolution ---
+async function getUser(reddit: RedditAPIClient) {
+  try {
+    const currUser = await reddit.getCurrentUser();
+    return {
+      id: currUser?.id || 'anon',
+      username: currUser?.username || 'Guest',
+      avatar_url: currUser?.snoovatarImage || 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png'
+    };
+  } catch (e) {
+    return { 
+      id: 'anon', 
+      username: 'Guest', 
+      avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png' 
+    };
+  }
+}
+
+// --- Helper: Database Hydration ---
+async function fetchAllData(redis: RedisClient) {
+  const collections = await redis.zRange(DB_REGISTRY_KEY, 0, -1);
+  const dbData: Record<string, any> = {};
+
+  await Promise.all(collections.map(async (entry) => {
+    // zRange can return objects { member, score } or strings depending on version/args, handle both
+    const colName = typeof entry === 'string' ? entry : entry.member;
+    const raw = await redis.hGetAll(colName);
+    const parsed: Record<string, any> = {};
+    
+    for (const [k, v] of Object.entries(raw)) {
+      try { parsed[k] = JSON.parse(v); } catch(e) { parsed[k] = v; }
+    }
+    dbData[colName] = parsed;
+  }));
+  
+  return dbData;
+}
+
+// --- Main Server Handler ---
+export async function handleWebviewMessage(msg: WebViewMessage, context: Devvit.Context) {
+  const { type, payload } = msg;
+  const { redis, reddit } = context;
+
+  // 1. Initial Load / Handshake
+  if (type === 'CLIENT_READY' || type === 'DB_LOAD') {
+    const [dbData, user] = await Promise.all([
+      fetchAllData(redis),
+      getUser(reddit)
+    ]);
+
+    return {
+      type: 'DB_HYDRATE',
+      payload: dbData,
+      user
+    };
+  }
+
+  // 2. Save Data
+  if (type === 'DB_SAVE' && payload) {
+    const { collection, key, value } = payload;
+    if (!collection || !key) return null;
+
+    // Save actual data
+    await redis.hSet(collection, { [key]: JSON.stringify(value) });
+    // Update registry so we know this collection exists
+    await redis.zAdd(DB_REGISTRY_KEY, { member: collection, score: Date.now() });
+    
+    return { type: 'DB_SAVED_ACK', payload: { collection, key } };
+  }
+
+  // 3. Logging
+  if (type === 'console') {
+    console.log('[Web]', ...(payload?.args || []));
+  }
+
+  return null;
+}
+`;
+
 export const getMainTsx = (title, webviewPath = 'index.html') => {
   const safeTitle = title.replace(/'/g, "\\'");
   return `/** @jsx Devvit.createElement */
 /** @jsxFrag Devvit.Fragment */
 
-import { Devvit, useAsync, useState } from '@devvit/public-api';
+import { Devvit } from '@devvit/public-api';
+import { handleWebviewMessage } from './server';
 
-// ------------------------------------------------------------------------
-// Server-Side Logic (Registry Pattern)
-// ------------------------------------------------------------------------
-const DB_REGISTRY_KEY = 'sys:registry';
-
+// Configure Capabilities
 Devvit.configure({
   redditAPI: true,
   redis: true,
+  http: true, // Useful for some integrations
 });
 
-// Helper: Fetch all collections dynamically
-async function fetchAllData(redis, reddit) {
-    try {
-        // 1. Get Registry (List of active collections)
-        const collections = await redis.zRange(DB_REGISTRY_KEY, 0, -1);
-        const dbData = {};
-
-        // 2. Parallel Fetch
-        await Promise.all(collections.map(async (item) => {
-            const colName = typeof item === 'string' ? item : item.member;
-            const raw = await redis.hGetAll(colName);
-            const parsed = {};
-            for (const [k, v] of Object.entries(raw)) {
-                try { parsed[k] = JSON.parse(v); } catch(e) { parsed[k] = v; }
-            }
-            dbData[colName] = parsed;
-        }));
-
-        // 3. Get User Identity
-        let user = { id: 'anon', username: 'Guest', avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png' };
-        try {
-            const currUser = await reddit.getCurrentUser();
-            if (currUser) {
-                user = {
-                    id: currUser.id,
-                    username: currUser.username,
-                    avatar_url: currUser.snoovatarImage || user.avatar_url
-                };
-            }
-        } catch(e) { console.warn('User fetch failed', e); }
-
-        return { dbData, user };
-    } catch(e) {
-        console.error('Hydration Error:', e);
-        return null;
-    }
-}
-
-// ------------------------------------------------------------------------
-// Menu Actions
-// ------------------------------------------------------------------------
-
+// Menu Item: Create Post
 Devvit.addMenuItem({
   label: 'Add Game Post',
   location: 'subreddit',
@@ -78,28 +125,11 @@ Devvit.addMenuItem({
   },
 });
 
-// ------------------------------------------------------------------------
-// Main Game Post
-// ------------------------------------------------------------------------
-
+// Custom Post: The Game Wrapper
 Devvit.addCustomPostType({
   name: 'WebSim Game',
   height: 'tall',
   render: (context) => {
-    const { redis, reddit, ui } = context;
-    
-    // Initial Hydration using useAsync (Prevents ServerCallRequired in render)
-    const { data: initialData, loading } = useAsync(async () => {
-        return await fetchAllData(redis, reddit);
-    });
-
-    const [webviewVisible, setWebviewVisible] = useState(false);
-
-    // Once data is loaded, we can signal the webview is ready to be shown/hydrated
-    if (!loading && initialData && !webviewVisible) {
-        setWebviewVisible(true);
-    }
-
     return (
       <vstack height="100%" width="100%">
         <webview
@@ -107,48 +137,16 @@ Devvit.addCustomPostType({
           url="${webviewPath}"
           width="100%"
           height="100%"
-          onMessage={async (event, webviewContext) => {
-            // CRITICAL: Destructure from the event handler context, NOT the render closure
-            // This fixes "Cannot destructure property 'redis' of undefined"
-            const { redis, ui } = webviewContext; 
-            
-            // message is the first arg (event), containing { type, payload }
-            const msg = event; 
-            const { type, payload } = msg || {};
-
-            if (!type) return;
-
-            // A. Client Requests Hydration (or we push it)
-            if (type === 'CLIENT_READY' || type === 'DB_LOAD') {
-                if (initialData) {
-                    ui.webView.postMessage('gameview', {
-                        type: 'DB_HYDRATE',
-                        payload: initialData.dbData,
-                        user: initialData.user
-                    });
-                } else {
-                    // Fallback re-fetch if useAsync failed or didn't run? 
-                    // (Shouldn't happen if logic above is correct)
+          onMessage={async (msg) => {
+             // Dispatch to Server Handler
+             try {
+                const response = await handleWebviewMessage(msg as any, context);
+                if (response) {
+                    context.ui.webView.postMessage('gameview', response);
                 }
-            }
-
-            // B. Database Save (Hot Swap)
-            if (type === 'DB_SAVE' && payload) {
-                try {
-                    const { collection, key, value } = payload;
-                    // 1. Save Data
-                    await redis.hSet(collection, { [key]: JSON.stringify(value) });
-                    // 2. Update Registry (Async, best effort)
-                    await redis.zAdd(DB_REGISTRY_KEY, { member: collection, score: Date.now() });
-                } catch(e) {
-                    console.error('DB Save Error:', e);
-                }
-            }
-            
-            // C. Logging
-            if (type === 'console') {
-                console.log('[Web]', ...(msg.args || []));
-            }
+             } catch (e) {
+                console.error('Server Error:', e);
+             }
           }}
         />
       </vstack>

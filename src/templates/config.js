@@ -15,7 +15,6 @@ export const generatePackageJson = (slug, dependencies = {}, devDependencies = {
     "@devvit/public-api": "latest",
     "@devvit/kit": "latest",
     "@devvit/web": "latest",
-    "@devvit/redis": "latest",
     ...dependencies
   },
   "devDependencies": {

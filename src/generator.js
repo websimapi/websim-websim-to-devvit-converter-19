@@ -10,6 +10,7 @@ import {
     generateViteConfig,
     tsConfig,
     getMainTsx,
+    getServerTs,
     simpleLoggerJs,
     websimSocketPolyfill,
     websimStubsJs,
@@ -136,7 +137,8 @@ export { Player } from '@remotion/player';
         `.trim());
     }
 
-    // 4. Source Code (Devvit Main.tsx)
+    // 4. Source Code (Devvit Server & Main)
+    zip.file("src/server.ts", getServerTs());
     zip.file("src/main.tsx", getMainTsx(projectTitle, indexPath));
 
     // Note: 'webroot' folder is not created here, it will be created by 'npm run build:client' inside the user's project.

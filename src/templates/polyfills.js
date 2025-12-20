@@ -27,10 +27,10 @@ export const simpleLoggerJs = `
     } catch(e) {}
   }
 
-  console.log = function(...args) { _log.apply(console, args); post('info', args); };
-  console.info = function(...args) { _info.apply(console, args); post('info', args); };
-  console.warn = function(...args) { _warn.apply(console, args); post('warn', args); };
-  console.error = function(...args) { _error.apply(console, args); post('error', args); };
+  console.log = function(...args) { _log.apply(console, args); post('console', { args: args }); };
+  console.info = function(...args) { _info.apply(console, args); post('console', { args: args }); };
+  console.warn = function(...args) { _warn.apply(console, args); post('console', { args: args }); };
+  console.error = function(...args) { _error.apply(console, args); post('console', { args: args }); };
 
   window.addEventListener('error', function(e) {
     post('error', ['[Uncaught]', e.message]);
@@ -50,7 +50,8 @@ export const websimSocketPolyfill = `
         send: (type, payload) => {
             // SANITIZATION: Strip out any DOM nodes or functions to prevent DataCloneError
             try {
-                const cleanPayload = JSON.parse(JSON.stringify(payload || {}));
+                const cleanPayload = payload === undefined ? null : JSON.parse(JSON.stringify(payload));
+                // Match the server expectation: object with type and payload
                 if (window.parent) window.parent.postMessage({ type, payload: cleanPayload }, '*');
             } catch (e) { console.error('Bridge Send Error:', e); }
         },
@@ -192,33 +193,22 @@ export const websimSocketPolyfill = `
     };
 
     // Mock WebSimSocket Class (Fixes "not a constructor" error)
-    window.WebsimSocket = class WebsimSocket {
-        constructor() {
-            // Delegate to the singleton instance
-            if (!window.websimSocketInstance) {
-                // Should have been created by previous lines, but safe fallback
-                console.warn("[WebSimSocket] Instance not ready, creating fallback");
-                window.websimSocketInstance = { collection: () => ({ subscribe:()=>{}, getList:()=>[], create:async()=>{}, update:async()=>{}, delete:async(){} }) };
-            }
-            return window.websimSocketInstance;
-        }
-        static updateIdentity(user) {
-            window._currentUser = user;
-        }
+    window.WebsimSocket = function() {
+        // Constructor that returns the singleton
+        return window.websimSocketInstance;
+    }
+    // Add static method to the function/class
+    window.WebsimSocket.updateIdentity = function(user) {
+        window._currentUser = user;
     };
     
     if (!window.party) { window.party = window.websimSocketInstance; }
 
     // Initialize Bridge
-    // Use a small timeout to allow React/UI to settle before asking for data
-    const startBridge = () => {
-        setTimeout(DevvitBridge.init, 100);
-    };
-
     if (document.readyState === 'complete') {
-        startBridge();
+        DevvitBridge.init();
     } else {
-        window.addEventListener('load', startBridge);
+        window.addEventListener('load', DevvitBridge.init);
     }
 })();
 `;
