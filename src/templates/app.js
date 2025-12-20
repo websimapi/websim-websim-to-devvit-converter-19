@@ -39,7 +39,8 @@ Devvit.addCustomPostType({
           for (const col of collections) {
             try {
                if (context.redis) {
-                   const data = await context.redis.hGetAll(`websim:data:${col}`);
+                   // Use concatenation to avoid nested template literal syntax errors
+                   const data = await context.redis.hGetAll('websim:data:' + col);
                    results[col] = data || {};
                }
             } catch(e) { console.error('Redis Error:', e); results[col] = {}; }
@@ -73,7 +74,7 @@ Devvit.addCustomPostType({
         // DB OPS (Create/Update/Delete)
         if (type === 'db_op') {
            const { cmd, collection, data } = payload;
-           const redisKey = \`websim:data:\${collection}\`;
+           const redisKey = 'websim:data:' + collection;
            
            if (cmd === 'create' || cmd === 'update') {
                await context.redis.hSet(redisKey, { [data.id]: JSON.stringify(data) });
