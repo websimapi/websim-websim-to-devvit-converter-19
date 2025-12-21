@@ -1,11 +1,13 @@
 export const generatePackageJson = (slug, dependencies = {}, devDependencies = {}) => JSON.stringify({
   "name": slug,
-  "version": "0.1.0",
+  "version": "0.0.1",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "devvit playtest",
-    "build:client": "NODE_ENV=production vite build",
+    "build:client": "cd src/client && vite build",
+    "build:server": "cd src/server && vite build",
+    "build": "npm run build:server && npm run build:client",
     "setup": "node scripts/setup.js", 
     "register": "devvit upload",
     "upload": "devvit upload",
@@ -16,6 +18,7 @@ export const generatePackageJson = (slug, dependencies = {}, devDependencies = {
     "@devvit/kit": "latest",
     "@devvit/web": "latest",
     "@devvit/redis": "latest",
+    "express": "^4.18.2",
     ...dependencies
   },
   "devDependencies": {
@@ -30,17 +33,49 @@ export const generatePackageJson = (slug, dependencies = {}, devDependencies = {
   }
 }, null, 2);
 
-export const generateDevvitYaml = (slug) => `name: ${slug}
-version: 0.1.0
-`;
+export const generateDevvitJson = (slug) => JSON.stringify({
+  "$schema": "https://developers.reddit.com/schema/config-file.v1.json",
+  "name": slug,
+  "post": {
+    "dir": "dist/client",
+    "entrypoints": {
+      "default": {
+        "entry": "index.html",
+        "height": "tall"
+      }
+    }
+  },
+  "server": {
+    "entry": "index.cjs"
+  },
+  "permissions": {
+    "redis": true,
+    "reddit": {
+      "enable": true,
+      "asUser": ["SUBMIT_POST", "SUBMIT_COMMENT"]
+    }
+  },
+  "triggers": {
+    "onAppInstall": "/internal/onInstall"
+  },
+  "menu": {
+    "items": [
+      {
+        "label": "Add Game Post",
+        "location": "subreddit",
+        "forUserType": "moderator",
+        "endpoint": "/internal/createPost"
+      }
+    ]
+  }
+}, null, 2);
 
-export const generateViteConfig = ({ hasReact = false, hasRemotion = false } = {}) => `
+export const generateClientViteConfig = ({ hasReact = false, hasRemotion = false } = {}) => `
 import { defineConfig } from 'vite';
 ${hasReact ? "import react from '@vitejs/plugin-react';" : ""}
 
 export default defineConfig({
   mode: 'production',
-  root: 'client',
   base: './',
   plugins: [
     ${hasReact ? `react({
@@ -69,17 +104,33 @@ export default defineConfig({
   },
   assetsInclude: ['**/*.mp3', '**/*.wav', '**/*.ogg', '**/*.glb', '**/*.gltf', '**/*.png', '**/*.jpg', '**/*.jpeg', '**/*.gif'],
   build: {
-    outDir: '../webroot',
+    outDir: '../../dist/client',
     emptyOutDir: true,
-    target: 'es2020', // Ensure broad compatibility without unsafe polyfills
-    minify: 'esbuild', 
+    target: 'es2020',
+    minify: 'esbuild',
+    // Increase the chunk size warning limit to 1000 KB to reduce noise
+    chunkSizeWarningLimit: 1000,
     rollupOptions: {
       output: {
         entryFileNames: "[name].js",
         chunkFileNames: "[name].js",
         assetFileNames: "[name][extname]",
+        // Manual chunking to split large dependencies
+        manualChunks(id) {
+          // Split Three.js into its own chunk if present
+          if (id.includes('node_modules/three')) {
+            return 'three';
+          }
+          // Split Remotion into its own chunk if present
+          if (id.includes('node_modules/remotion') || id.includes('node_modules/@remotion')) {
+            return 'remotion';
+          }
+          // Split React into its own chunk if present
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) {
+            return 'react-vendor';
+          }
+        }
       },
-      // Ensure React is treated as a singleton
       external: [], 
     },
   },
@@ -108,10 +159,37 @@ export const tsConfig = JSON.stringify({
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,
-    "noImplicitAny": false
+    "noImplicitAny": false,
+    "allowJs": true
   },
   "include": [
     "src"
   ]
 }, null, 2);
+
+export const generateServerViteConfig = () => `
+import { defineConfig } from 'vite';
+import { builtinModules } from 'node:module';
+
+export default defineConfig({
+  ssr: {
+    noExternal: true,
+  },
+  build: {
+    ssr: 'index.ts',
+    outDir: '../../dist/server',
+    target: 'node22',
+    sourcemap: true,
+    emptyOutDir: true,
+    rollupOptions: {
+      external: [...builtinModules],
+      output: {
+        format: 'cjs',
+        entryFileNames: 'index.cjs',
+        inlineDynamicImports: true,
+      },
+    },
+  },
+});
+`;
 

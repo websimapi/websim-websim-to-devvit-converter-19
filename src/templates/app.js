@@ -1,28 +1,32 @@
-export const getMainTsx = (title, webviewPath = 'index.html') => {
-  const safeTitle = title.replace(/'/g, "\\'");
-  return `/** @jsx Devvit.createElement */
-/** @jsxFrag Devvit.Fragment */
+export const getMainTs = (title) => {
+    const safeTitle = title.replace(/'/g, "\\'");
+    return `
+import express from 'express';
+import { 
+    createServer, 
+    context, 
+    getServerPort, 
+    redis, 
+    reddit 
+} from '@devvit/web/server';
 
-import { Devvit, useAsync, useState } from '@devvit/public-api';
+const app = express();
 
-// ------------------------------------------------------------------------
-// Server-Side Logic (Registry Pattern)
-// ------------------------------------------------------------------------
+// Body parsers
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.text());
+
+const router = express.Router();
+
+// --- Database Helpers ---
 const DB_REGISTRY_KEY = 'sys:registry';
 
-Devvit.configure({
-  redditAPI: true,
-  redis: true,
-});
-
-// Helper: Fetch all collections dynamically
-async function fetchAllData(redis, reddit) {
+async function fetchAllData() {
     try {
-        // 1. Get Registry (List of active collections)
         const collections = await redis.zRange(DB_REGISTRY_KEY, 0, -1);
         const dbData = {};
 
-        // 2. Parallel Fetch
         await Promise.all(collections.map(async (item) => {
             const colName = typeof item === 'string' ? item : item.member;
             const raw = await redis.hGetAll(colName);
@@ -33,130 +37,129 @@ async function fetchAllData(redis, reddit) {
             dbData[colName] = parsed;
         }));
 
-        // 3. Get User Identity
-        let user = { id: 'anon', username: 'Guest', avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png' };
+        let user = { 
+            id: 'anon', 
+            username: 'Guest', 
+            avatar_url: 'https://www.redditstatic.com/avatars/avatar_default_02_FF4500.png' 
+        };
+        
         try {
-            const currUser = await reddit.getCurrentUser();
-            if (currUser) {
-                user = {
-                    id: currUser.id,
-                    username: currUser.username,
-                    avatar_url: currUser.snoovatarImage || user.avatar_url
+            // Try to get current user from context or Reddit API
+            if (context.userId) {
+                user = { 
+                    id: context.userId, 
+                    username: context.username || 'RedditUser',
+                    avatar_url: user.avatar_url 
                 };
+            } else {
+                const currUser = await reddit.getCurrentUser();
+                if (currUser) {
+                    user = {
+                        id: currUser.id,
+                        username: currUser.username,
+                        avatar_url: currUser.snoovatarImage || user.avatar_url
+                    };
+                }
             }
-        } catch(e) { console.warn('User fetch failed', e); }
+        } catch(e) { 
+            console.warn('User fetch failed', e); 
+        }
 
         return { dbData, user };
     } catch(e) {
         console.error('Hydration Error:', e);
-        return null;
+        return { dbData: {}, user: null };
     }
 }
 
-// ------------------------------------------------------------------------
-// Menu Actions
-// ------------------------------------------------------------------------
+// --- API Routes (Client -> Server) ---
+// Note: All client-callable endpoints must start with /api/
 
-Devvit.addMenuItem({
-  label: 'Add Game Post',
-  location: 'subreddit',
-  forUserType: 'moderator',
-  onPress: async (_event, context) => {
-    const { reddit, ui } = context;
-    const subreddit = await reddit.getCurrentSubreddit();
-    const post = await reddit.submitPost({
-      title: '${safeTitle}',
-      subredditName: subreddit.name,
-      preview: (
-        <vstack height="100%" width="100%" alignment="middle center">
-          <text size="large">Loading Game...</text>
-        </vstack>
-      ),
-    });
-    ui.showToast({ text: 'Created Game Post!' });
-    ui.navigateTo(post);
-  },
+router.get('/api/init', async (_req, res) => {
+    const data = await fetchAllData();
+    res.json(data);
 });
 
-// ------------------------------------------------------------------------
-// Main Game Post
-// ------------------------------------------------------------------------
-
-Devvit.addCustomPostType({
-  name: 'WebSim Game',
-  height: 'tall',
-  render: (context) => {
-    const { redis, reddit, ui } = context;
-    
-    // Initial Hydration using useAsync (Prevents ServerCallRequired in render)
-    const { data: initialData, loading } = useAsync(async () => {
-        return await fetchAllData(redis, reddit);
-    });
-
-    const [webviewVisible, setWebviewVisible] = useState(false);
-
-    // Once data is loaded, we can signal the webview is ready to be shown/hydrated
-    if (!loading && initialData && !webviewVisible) {
-        setWebviewVisible(true);
+router.post('/api/save', async (req, res) => {
+    try {
+        const { collection, key, value } = req.body;
+        await redis.hSet(collection, { [key]: JSON.stringify(value) });
+        await redis.zAdd(DB_REGISTRY_KEY, { member: collection, score: Date.now() });
+        res.json({ success: true, collection, key });
+    } catch(e) {
+        console.error('DB Save Error:', e);
+        res.status(500).json({ error: e.message });
     }
-
-    return (
-      <vstack height="100%" width="100%">
-        <webview
-          id="gameview"
-          url="${webviewPath}"
-          width="100%"
-          height="100%"
-          onMessage={async (event, webviewContext) => {
-            // CRITICAL: Destructure from the event handler context, NOT the render closure
-            // This fixes "Cannot destructure property 'redis' of undefined"
-            const { redis, ui } = webviewContext; 
-            
-            // message is the first arg (event), containing { type, payload }
-            const msg = event; 
-            const { type, payload } = msg || {};
-
-            if (!type) return;
-
-            // A. Client Requests Hydration (or we push it)
-            if (type === 'CLIENT_READY' || type === 'DB_LOAD') {
-                if (initialData) {
-                    ui.webView.postMessage('gameview', {
-                        type: 'DB_HYDRATE',
-                        payload: initialData.dbData,
-                        user: initialData.user
-                    });
-                } else {
-                    // Fallback re-fetch if useAsync failed or didn't run? 
-                    // (Shouldn't happen if logic above is correct)
-                }
-            }
-
-            // B. Database Save (Hot Swap)
-            if (type === 'DB_SAVE' && payload) {
-                try {
-                    const { collection, key, value } = payload;
-                    // 1. Save Data
-                    await redis.hSet(collection, { [key]: JSON.stringify(value) });
-                    // 2. Update Registry (Async, best effort)
-                    await redis.zAdd(DB_REGISTRY_KEY, { member: collection, score: Date.now() });
-                } catch(e) {
-                    console.error('DB Save Error:', e);
-                }
-            }
-            
-            // C. Logging
-            if (type === 'console') {
-                console.log('[Web]', ...(msg.args || []));
-            }
-          }}
-        />
-      </vstack>
-    );
-  },
 });
 
-export default Devvit;
+router.post('/api/load', async (req, res) => {
+    try {
+        const { collection, key } = req.body;
+        const value = await redis.hGet(collection, key);
+        res.json({ collection, key, value: value ? JSON.parse(value) : null });
+    } catch(e) {
+        console.error('DB Get Error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+router.post('/api/delete', async (req, res) => {
+    try {
+        const { collection, key } = req.body;
+        await redis.hDel(collection, [key]);
+        res.json({ success: true, collection, key });
+    } catch(e) {
+        console.error('DB Delete Error:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- Internal Routes (Menu/Triggers) ---
+// Note: All internal endpoints must start with /internal/
+
+router.post('/internal/onInstall', async (req, res) => {
+    console.log('App installed!');
+    res.json({ success: true });
+});
+
+router.post('/internal/createPost', async (_req, res) => {
+    console.log('Creating game post...');
+    
+    try {
+        // Use the global context object from @devvit/web/server
+        const { subredditName } = context;
+        console.log('Context Subreddit:', subredditName);
+
+        if (!subredditName) {
+            return res.status(400).json({ error: 'Subreddit name is required' });
+        }
+
+        const post = await reddit.submitCustomPost({
+            title: '${safeTitle}',
+            subredditName: subredditName,
+            entry: 'default', // matches devvit.json entrypoint
+            userGeneratedContent: {
+                text: 'Play this game built with WebSim!'
+            }
+        });
+
+        res.json({
+            showToast: { text: 'Game post created!' },
+            navigateTo: post
+        });
+    } catch (e) {
+        console.error('Failed to create post:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.use(router);
+
+const port = getServerPort();
+const server = createServer(app);
+
+server.on('error', (err) => console.error(\`server error; \${err.stack}\`));
+server.listen(port, () => console.log(\`Server listening on \${port}\`));
 `;
 };
 

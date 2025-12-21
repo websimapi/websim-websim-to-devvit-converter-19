@@ -239,7 +239,8 @@ export class AssetAnalyzer {
         const extractedScripts = [];
         let scriptCounter = 0;
 
-        // Ensure DOCTYPE
+        // Ensure DOCTYPE (FIX for Quirks Mode)
+        // Must be the very first characters
         if (!html.trim().toLowerCase().startsWith('<!doctype')) {
             html = '<!DOCTYPE html>\n' + html;
         }

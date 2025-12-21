@@ -41,64 +41,50 @@ export const simpleLoggerJs = `
 export const websimSocketPolyfill = `
 // [WebSim] Generic DB & Bridge Polyfill
 (function() {
-    // 1. Generic State Store
+    // ------------------------------------------------------------------------
+    // 1. Generic Bridge (Devvit <-> Webview)
+    // ------------------------------------------------------------------------
     window._genericDB = {};
-    window._subscribers = {}; // Map<collection, Function[]>
+    window._subscribers = {};
+    window._currentUser = null;
 
-    // 2. The Bridge Logic
     const DevvitBridge = {
-        send: (type, payload) => {
-            // SANITIZATION: Strip out any DOM nodes or functions to prevent DataCloneError
-            try {
-                const cleanPayload = JSON.parse(JSON.stringify(payload || {}));
-                if (window.parent) window.parent.postMessage({ type, payload: cleanPayload }, '*');
-            } catch (e) { console.error('Bridge Send Error:', e); }
-        },
-
-        init: () => {
+        init: async () => {
             console.log("[Bridge] Initializing...");
             
-            window.addEventListener('message', (event) => {
-                const data = event.data || {};
-                const type = data.type;
-                const payload = data.payload;
-
-                // A. The "Magic" Hydration
-                if (type === 'DB_HYDRATE') {
-                    console.log("[Bridge] Database Hydrated");
-                    if (payload) window._genericDB = payload;
+            try {
+                // Load initial data from server via HTTP
+                const data = await fetch('/api/init').then(r => r.json());
+                
+                if (data.dbData) {
+                    window._genericDB = data.dbData;
+                    window._currentUser = data.user;
                     
-                    // Trigger generic event
-                    const readyEvent = new CustomEvent('GAMEDATA_READY', { detail: payload });
+                    // Legacy stub support
+                    if (window.WebsimSocket && window.WebsimSocket.updateIdentity && data.user) {
+                        window.WebsimSocket.updateIdentity(data.user);
+                    }
+                    
+                    const readyEvent = new CustomEvent('GAMEDATA_READY', { 
+                        detail: data.dbData 
+                    });
                     window.dispatchEvent(readyEvent);
                     
-                    // Handle Identity if sent alongside DB
-                    if (data.user) {
-                         if (window.WebsimSocket && window.WebsimSocket.updateIdentity) {
-                             window.WebsimSocket.updateIdentity(data.user);
-                         }
-                         // Broadcast legacy event for stubs
-                         window.postMessage({ type: 'set_user_context', payload: { user: data.user } }, '*');
-                    }
-
-                    // Notify all subscribers
                     Object.keys(window._subscribers).forEach(col => {
-                         DevvitBridge.notifySubscribers(col);
+                        DevvitBridge.notifySubscribers(col);
                     });
                 }
-            });
-
-            // B. Send the Handshake
-            if (window.parent) {
-                DevvitBridge.send('CLIENT_READY');
+            } catch (e) {
+                console.warn("[Bridge] Init failed (might be offline)", e);
             }
         },
 
         notifySubscribers: (collection) => {
             if (window._subscribers[collection]) {
                 const list = Object.values(window._genericDB[collection] || {});
-                // Sort by created_at if possible, else default
+                // Sort by created_at desc (standard behavior)
                 list.sort((a,b) => (b.created_at || 0) < (a.created_at || 0) ? -1 : 1);
+                
                 window._subscribers[collection].forEach(cb => {
                     try { cb(list); } catch(e) { console.error(e); }
                 });
@@ -106,33 +92,105 @@ export const websimSocketPolyfill = `
         }
     };
 
-    // 3. Expose a Simple API
+    // Expose API
     window.GenericDB = {
-        save: (collection, key, value) => {
-            if (!window._genericDB[collection]) window._genericDB[collection] = {};
+        save: async (collection, key, value) => {
+            if (!window._genericDB[collection]) {
+                window._genericDB[collection] = {};
+            }
             window._genericDB[collection][key] = value;
             
-            // Notify local subscribers immediately (Optimistic)
+            // Optimistic local update
             DevvitBridge.notifySubscribers(collection);
-
-            DevvitBridge.send('DB_SAVE', { collection, key, value });
+            
+            // Send to server via HTTP
+            try {
+                await fetch('/api/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ collection, key, value })
+                });
+            } catch (e) {
+                console.error("[Bridge] Save failed:", e);
+            }
         },
+        
         get: (collection, key) => {
             return window._genericDB[collection]?.[key] || null;
         },
+        
         getAll: (collection) => {
             return window._genericDB[collection] || {};
+        },
+        
+        // Async get from server (bypasses cache)
+        fetchFromServer: async (collection, key) => {
+            try {
+                const res = await fetch('/api/load', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ collection, key })
+                });
+                const data = await res.json();
+                return data.value;
+            } catch(e) { 
+                console.error("[Bridge] Load failed:", e);
+                return null; 
+            }
+        },
+        
+        delete: async (collection, key) => {
+            if (window._genericDB[collection]) {
+                delete window._genericDB[collection][key];
+            }
+            DevvitBridge.notifySubscribers(collection);
+            
+            try {
+                await fetch('/api/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ collection, key })
+                });
+            } catch (e) {
+                console.error("[Bridge] Delete failed:", e);
+            }
+        },
+        
+        subscribe: (collection, callback) => {
+            if (!window._subscribers[collection]) {
+                window._subscribers[collection] = [];
+            }
+            window._subscribers[collection].push(callback);
+            
+            // Immediate callback with current data
+            const currentList = Object.values(window._genericDB[collection] || {});
+            currentList.sort((a,b) => (b.created_at || 0) < (a.created_at || 0) ? -1 : 1);
+            callback(currentList);
+            
+            // Return unsubscribe function
+            return () => {
+                window._subscribers[collection] = 
+                    window._subscribers[collection].filter(f => f !== callback);
+            };
         }
     };
 
-    // 4. WebSim Socket Adapter (Backward Compatibility)
-    // Maps legacy websim.collection() calls to GenericDB
+    // Initialize on load
+    if (document.readyState === 'complete') {
+        setTimeout(DevvitBridge.init, 100);
+    } else {
+        window.addEventListener('load', () => setTimeout(DevvitBridge.init, 100));
+    }
+
+    // ------------------------------------------------------------------------
+    // 2. WebSim Adapter (Backward Compatibility)
+    // ------------------------------------------------------------------------
     class AdapterCollection {
         constructor(name) { this.name = name; }
         
         getList() { 
-            return Object.values(window.GenericDB.getAll(this.name))
-                   .sort((a,b) => (b.created_at || 0) < (a.created_at || 0) ? -1 : 1);
+            const list = Object.values(window.GenericDB.getAll(this.name));
+            return list.sort((a,b) => (b.created_at || 0) < (a.created_at || 0) ? -1 : 1);
         }
         
         async create(data) {
@@ -148,26 +206,22 @@ export const websimSocketPolyfill = `
 
         async update(id, data) {
             const current = window.GenericDB.get(this.name, id);
-            if (!current) throw new Error('Record not found');
+            // If not found in cache, we could optionally await fetchFromServer here, 
+            // but strict WebSim API is synchronous for getList/etc usually, async for update.
+            // For now, assume hydration is complete or we rely on cache.
+            if (!current) throw new Error('Record not found or not loaded');
+            
             const record = { ...current, ...data };
             window.GenericDB.save(this.name, id, record);
             return record;
         }
 
         async delete(id) {
-             if (window._genericDB[this.name]) {
-                 delete window._genericDB[this.name][id];
-                 DevvitBridge.notifySubscribers(this.name);
-             }
+             await window.GenericDB.delete(this.name, id);
         }
 
         subscribe(cb) {
-            if (!window._subscribers[this.name]) window._subscribers[this.name] = [];
-            window._subscribers[this.name].push(cb);
-            cb(this.getList());
-            return () => {
-                window._subscribers[this.name] = window._subscribers[this.name].filter(f => f !== cb);
-            };
+            return window.GenericDB.subscribe(this.name, cb);
         }
         
         filter(criteria) {
@@ -186,19 +240,13 @@ export const websimSocketPolyfill = `
         }
     }
 
-    // Stub websimSocketInstance for legacy checks
-    window.websimSocketInstance = {
-        collection: (name) => new AdapterCollection(name)
-    };
-
-    // Mock WebSimSocket Class (Fixes "not a constructor" error)
+    // Mock WebSimSocket Class
     window.WebsimSocket = class WebsimSocket {
         constructor() {
-            // Delegate to the singleton instance
             if (!window.websimSocketInstance) {
-                // Should have been created by previous lines, but safe fallback
-                console.warn("[WebSimSocket] Instance not ready, creating fallback");
-                window.websimSocketInstance = { collection: () => ({ subscribe:()=>{}, getList:()=>[], create:async()=>{}, update:async()=>{}, delete:async ()=>{} }) };
+                window.websimSocketInstance = { 
+                    collection: (name) => new AdapterCollection(name) 
+                };
             }
             return window.websimSocketInstance;
         }
@@ -207,18 +255,12 @@ export const websimSocketPolyfill = `
         }
     };
     
-    if (!window.party) { window.party = window.websimSocketInstance; }
-
-    // Initialize Bridge
-    // Use a small timeout to allow React/UI to settle before asking for data
-    const startBridge = () => {
-        setTimeout(DevvitBridge.init, 100);
-    };
-
-    if (document.readyState === 'complete') {
-        startBridge();
-    } else {
-        window.addEventListener('load', startBridge);
+    // Auto-instantiate if game expects 'party'
+    if (!window.party) { 
+        window.websimSocketInstance = { 
+            collection: (name) => new AdapterCollection(name) 
+        };
+        window.party = window.websimSocketInstance; 
     }
 })();
 `;
